@@ -4,7 +4,9 @@
       "Bash(xcodebuild:*)",
       "Bash(xcrun simctl:*)",
       "Bash(open:*)",
-      "Bash(screencapture:*)"
+      "Bash(screencapture:*)",
+      "Bash(pgrep:*)",
+      "Bash(osascript:*)"
     ]
   }
 }
