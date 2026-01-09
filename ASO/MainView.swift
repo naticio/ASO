@@ -156,13 +156,22 @@ struct KeywordTableView: View {
     @State private var sortAscending = true
     @State private var isRefreshing = false
     @State private var competitorApps: [UUID: [AppStoreApp]] = [:]
+    @State private var searchText = ""
+    @State private var isSearching = false
 
     enum KeywordSortOrder {
-        case keyword, popularity, difficulty, position
+        case keyword, popularity, difficulty, position, downloads
+    }
+
+    var filteredKeywords: [TrackedKeyword] {
+        if searchText.isEmpty {
+            return app.keywords
+        }
+        return app.keywords.filter { $0.keyword.localizedCaseInsensitiveContains(searchText) }
     }
 
     var sortedKeywords: [TrackedKeyword] {
-        let keywords = app.keywords
+        let keywords = filteredKeywords
         return keywords.sorted { a, b in
             let result: Bool
             switch sortOrder {
@@ -176,6 +185,8 @@ struct KeywordTableView: View {
                 let rankA = a.currentRank ?? 999
                 let rankB = b.currentRank ?? 999
                 result = rankA < rankB
+            case .downloads:
+                result = a.estimatedDownloads < b.estimatedDownloads
             }
             return sortAscending ? result : !result
         }
@@ -269,6 +280,48 @@ struct KeywordTableView: View {
             Text("\(app.keywords.count) keywords")
                 .font(.caption)
                 .foregroundColor(.secondary)
+
+            // Search field
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.secondary)
+                    .font(.system(size: 12))
+
+                if isSearching {
+                    TextField("Search keywords", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13))
+                        .frame(width: 150)
+
+                    if !searchText.isEmpty {
+                        Button(action: { searchText = "" }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                                .font(.system(size: 12))
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Button(action: {
+                        isSearching = false
+                        searchText = ""
+                    }) {
+                        Text("Done")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.blue)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(isSearching ? Color.secondary.opacity(0.15) : Color.clear)
+            .cornerRadius(6)
+            .onTapGesture {
+                if !isSearching {
+                    isSearching = true
+                }
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -279,18 +332,21 @@ struct KeywordTableView: View {
         HStack(spacing: 0) {
             headerButton("Keyword", width: nil, alignment: .leading, sort: .keyword)
 
-            headerButton("Popularity", width: 120, alignment: .leading, sort: .popularity)
+            headerButton("Popularity", width: 100, alignment: .leading, sort: .popularity)
                 .help("Search popularity score (0-100)")
 
-            headerButton("Difficulty", width: 120, alignment: .leading, sort: .difficulty)
+            headerButton("Difficulty", width: 100, alignment: .leading, sort: .difficulty)
                 .help("Competition difficulty score (0-100)")
+
+            headerButton("Downloads", width: 80, alignment: .trailing, sort: .downloads)
+                .help("Estimated monthly downloads from this keyword")
 
             headerButton("Position", width: 100, alignment: .trailing, sort: .position)
 
             Text("Apps in Ranking")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(.secondary)
-                .frame(width: 200, alignment: .leading)
+                .frame(width: 180, alignment: .leading)
                 .padding(.horizontal, 8)
         }
         .padding(.horizontal, 16)
@@ -401,12 +457,17 @@ struct KeywordRow: View {
 
             // Popularity bar
             PopularityBar(value: keyword.popularity, color: .yellow)
-                .frame(width: 120)
+                .frame(width: 100)
                 .padding(.horizontal, 8)
 
             // Difficulty bar
             DifficultyBar(value: keyword.difficulty)
-                .frame(width: 120)
+                .frame(width: 100)
+                .padding(.horizontal, 8)
+
+            // Downloads
+            DownloadsCell(downloads: keyword.estimatedDownloads)
+                .frame(width: 80, alignment: .trailing)
                 .padding(.horizontal, 8)
 
             // Position
@@ -416,7 +477,7 @@ struct KeywordRow: View {
 
             // Competitors
             CompetitorsCell(apps: competitors)
-                .frame(width: 200, alignment: .leading)
+                .frame(width: 180, alignment: .leading)
                 .padding(.horizontal, 8)
 
             // Delete button (on hover)
@@ -436,6 +497,30 @@ struct KeywordRow: View {
         .onHover { hovering in
             isHovering = hovering
         }
+    }
+}
+
+// MARK: - Downloads Cell
+struct DownloadsCell: View {
+    let downloads: Int
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 10))
+                .foregroundColor(.blue)
+            Text(formattedDownloads)
+                .font(.system(size: 12, weight: .medium))
+        }
+    }
+
+    var formattedDownloads: String {
+        if downloads >= 1_000_000 {
+            return String(format: "%.1fM", Double(downloads) / 1_000_000.0)
+        } else if downloads >= 1000 {
+            return String(format: "%.1fK", Double(downloads) / 1000.0)
+        }
+        return "\(downloads)"
     }
 }
 

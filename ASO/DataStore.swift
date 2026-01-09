@@ -13,33 +13,205 @@ class DataStore: ObservableObject {
     @Published var trackedApps: [TrackedApp] = []
     @Published var selectedCountry: Country = Country.all[0]
     @Published var isLoading = false
+    @Published var isSyncing = false
     @Published var error: String?
+    @Published var lastSyncDate: Date?
 
     private let appsKey = "trackedApps"
     private let countryKey = "selectedCountry"
+    private let lastSyncKey = "lastSyncDate"
+
+    private let iCloud = NSUbiquitousKeyValueStore.default
+    private let localStorage = UserDefaults.standard
 
     private init() {
+        setupiCloudObserver()
         loadData()
+        syncFromiCloud()
     }
 
-    // MARK: - Persistence
+    // MARK: - iCloud Observer
+    private func setupiCloudObserver() {
+        NotificationCenter.default.addObserver(
+            forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
+            object: iCloud,
+            queue: .main
+        ) { [weak self] notification in
+            Task { @MainActor in
+                self?.handleiCloudChange(notification)
+            }
+        }
+
+        // Start iCloud sync
+        iCloud.synchronize()
+    }
+
+    private func handleiCloudChange(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let changeReason = userInfo[NSUbiquitousKeyValueStoreChangeReasonKey] as? Int else {
+            return
+        }
+
+        switch changeReason {
+        case NSUbiquitousKeyValueStoreServerChange,
+             NSUbiquitousKeyValueStoreInitialSyncChange:
+            // Data changed on another device, merge it
+            syncFromiCloud()
+        case NSUbiquitousKeyValueStoreQuotaViolationChange:
+            error = "iCloud storage quota exceeded"
+        case NSUbiquitousKeyValueStoreAccountChange:
+            // Account changed, reload data
+            syncFromiCloud()
+        default:
+            break
+        }
+    }
+
+    // MARK: - Load Data
     private func loadData() {
-        if let data = UserDefaults.standard.data(forKey: appsKey),
+        // First try to load from local storage
+        if let data = localStorage.data(forKey: appsKey),
            let apps = try? JSONDecoder().decode([TrackedApp].self, from: data) {
             self.trackedApps = apps
         }
 
-        if let countryCode = UserDefaults.standard.string(forKey: countryKey),
+        if let countryCode = localStorage.string(forKey: countryKey),
            let country = Country.country(for: countryCode) {
             self.selectedCountry = country
         }
+
+        if let syncDate = localStorage.object(forKey: lastSyncKey) as? Date {
+            self.lastSyncDate = syncDate
+        }
     }
 
-    private func saveData() {
-        if let data = try? JSONEncoder().encode(trackedApps) {
-            UserDefaults.standard.set(data, forKey: appsKey)
+    // MARK: - Sync from iCloud
+    func syncFromiCloud() {
+        isSyncing = true
+
+        // Get data from iCloud
+        if let cloudData = iCloud.data(forKey: appsKey),
+           let cloudApps = try? JSONDecoder().decode([TrackedApp].self, from: cloudData) {
+
+            // Merge cloud data with local data
+            let mergedApps = mergeApps(local: trackedApps, cloud: cloudApps)
+            trackedApps = mergedApps
+
+            // Save merged data back to local and cloud
+            saveToLocal()
+            saveToiCloud()
         }
-        UserDefaults.standard.set(selectedCountry.code, forKey: countryKey)
+
+        if let countryCode = iCloud.string(forKey: countryKey),
+           let country = Country.country(for: countryCode) {
+            self.selectedCountry = country
+        }
+
+        lastSyncDate = Date()
+        localStorage.set(lastSyncDate, forKey: lastSyncKey)
+        isSyncing = false
+    }
+
+    // MARK: - Merge Logic
+    private func mergeApps(local: [TrackedApp], cloud: [TrackedApp]) -> [TrackedApp] {
+        var merged: [TrackedApp] = []
+        var processedIds = Set<Int>()
+
+        // Process all local apps
+        for localApp in local {
+            processedIds.insert(localApp.trackId)
+
+            if let cloudApp = cloud.first(where: { $0.trackId == localApp.trackId }) {
+                // App exists in both - merge keywords and keep the most recent data
+                var mergedApp = localApp.lastUpdated > cloudApp.lastUpdated ? localApp : cloudApp
+                mergedApp.keywords = mergeKeywords(local: localApp.keywords, cloud: cloudApp.keywords)
+                mergedApp.ratingSnapshots = mergeSnapshots(local: localApp.ratingSnapshots, cloud: cloudApp.ratingSnapshots)
+                merged.append(mergedApp)
+            } else {
+                // Only in local
+                merged.append(localApp)
+            }
+        }
+
+        // Add apps that only exist in cloud
+        for cloudApp in cloud where !processedIds.contains(cloudApp.trackId) {
+            merged.append(cloudApp)
+        }
+
+        return merged.sorted { $0.lastUpdated > $1.lastUpdated }
+    }
+
+    private func mergeKeywords(local: [TrackedKeyword], cloud: [TrackedKeyword]) -> [TrackedKeyword] {
+        var merged: [TrackedKeyword] = []
+        var processedIds = Set<UUID>()
+
+        for localKeyword in local {
+            processedIds.insert(localKeyword.id)
+
+            if let cloudKeyword = cloud.first(where: { $0.id == localKeyword.id }) {
+                // Merge rankings
+                var mergedKeyword = localKeyword
+                let allRankings = Set(localKeyword.rankings.map { $0.id }).union(cloudKeyword.rankings.map { $0.id })
+                let localRankingsDict = Dictionary(uniqueKeysWithValues: localKeyword.rankings.map { ($0.id, $0) })
+                let cloudRankingsDict = Dictionary(uniqueKeysWithValues: cloudKeyword.rankings.map { ($0.id, $0) })
+
+                mergedKeyword.rankings = allRankings.compactMap { id in
+                    localRankingsDict[id] ?? cloudRankingsDict[id]
+                }.sorted { $0.date < $1.date }
+
+                merged.append(mergedKeyword)
+            } else {
+                merged.append(localKeyword)
+            }
+        }
+
+        // Add keywords only in cloud
+        for cloudKeyword in cloud where !processedIds.contains(cloudKeyword.id) {
+            merged.append(cloudKeyword)
+        }
+
+        return merged
+    }
+
+    private func mergeSnapshots(local: [RatingSnapshot], cloud: [RatingSnapshot]) -> [RatingSnapshot] {
+        let allIds = Set(local.map { $0.id }).union(cloud.map { $0.id })
+        let localDict = Dictionary(uniqueKeysWithValues: local.map { ($0.id, $0) })
+        let cloudDict = Dictionary(uniqueKeysWithValues: cloud.map { ($0.id, $0) })
+
+        return allIds.compactMap { id in
+            localDict[id] ?? cloudDict[id]
+        }.sorted { $0.date < $1.date }
+    }
+
+    // MARK: - Save Data
+    private func saveData() {
+        saveToLocal()
+        saveToiCloud()
+    }
+
+    private func saveToLocal() {
+        if let data = try? JSONEncoder().encode(trackedApps) {
+            localStorage.set(data, forKey: appsKey)
+        }
+        localStorage.set(selectedCountry.code, forKey: countryKey)
+    }
+
+    private func saveToiCloud() {
+        if let data = try? JSONEncoder().encode(trackedApps) {
+            iCloud.set(data, forKey: appsKey)
+        }
+        iCloud.set(selectedCountry.code, forKey: countryKey)
+        iCloud.synchronize()
+    }
+
+    // MARK: - Force Sync
+    func forceSync() {
+        isSyncing = true
+        iCloud.synchronize()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.syncFromiCloud()
+        }
     }
 
     // MARK: - App Management

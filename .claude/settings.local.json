@@ -6,7 +6,9 @@
       "Bash(open:*)",
       "Bash(screencapture:*)",
       "Bash(pgrep:*)",
-      "Bash(osascript:*)"
+      "Bash(osascript:*)",
+      "Bash(pkill:*)",
+      "Bash(xargs open:*)"
     ]
   }
 }
